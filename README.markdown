@@ -82,7 +82,7 @@ The `.pk4` file in `base/` packages assets for efficient engine loading.
 ## Usage
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ALH477/idtech4-project-packager.git
+   git clone https://github.com/ALH477/CREATE_IDTECH4_PROJECT.git
    ```
 2. Navigate to the directory:
    ```bash
