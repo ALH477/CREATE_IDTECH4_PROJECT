@@ -557,7 +557,7 @@ def build_binary(stdscr):
 
 def curses_menu(stdscr):
     """
-    Main curses TUI loop.
+    Main curses TUI loop with ASCII Sierpinski triangle.
     Args:
         stdscr: Curses screen object.
     """
@@ -577,19 +577,35 @@ def curses_menu(stdscr):
     ]
     current_row = 0
     
+    # ASCII Sierpinski triangle (8 lines, provided by ALH477)
+    sierpinski = """\
+        /\\
+       /__\\
+      /\\  /\\
+     /__\\/__\\
+    /\\      /\\
+   /__\\    /__\\
+  /\\  /\\  /\\  /\\
+ /__\\/__\\/__\\/__\\
+"""
+    
     while True:
         stdscr.clear()
-        stdscr.addstr(0, 0, "Welcome to the IDTECH4 Project Manager!")
-        stdscr.addstr(1, 0, "Built for PetaByte Madness™ by DeMoD LLC")
-        stdscr.addstr(2, 0, "Use arrow keys to navigate, Enter to select")
+        # Display Sierpinski triangle
+        for i, line in enumerate(sierpinski.splitlines()):
+            stdscr.addstr(i, 0, line)
+        # Display menu below triangle
+        stdscr.addstr(10, 0, "Welcome to the IDTECH4 Project Manager!")
+        stdscr.addstr(11, 0, "Built for PetaByte Madness™ by DeMoD LLC")
+        stdscr.addstr(12, 0, "Use arrow keys to navigate, Enter to select")
         
         for idx, item in enumerate(menu_items):
             if idx == current_row:
                 stdscr.attron(curses.A_REVERSE)
-                stdscr.addstr(4 + idx, 0, item)
+                stdscr.addstr(14 + idx, 0, item)
                 stdscr.attroff(curses.A_REVERSE)
             else:
-                stdscr.addstr(4 + idx, 0, item)
+                stdscr.addstr(14 + idx, 0, item)
         
         stdscr.refresh()
         key = stdscr.getch()
