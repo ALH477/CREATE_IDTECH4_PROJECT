@@ -99,7 +99,7 @@ The `.pk4` file, typically placed in `base/`, packages these assets into a singl
 ## Usage
 1. Clone or download this repository:
    ```bash
-   git clone https://github.com/ALH477/idtech4-project-packager.git
+   git clone https://github.com/ALH477/CREATE_IDTECH4_PROJECT.git
    ```
 2. Navigate to the project directory:
    ```bash
