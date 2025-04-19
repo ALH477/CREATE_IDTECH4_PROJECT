@@ -1,6 +1,6 @@
 # IDTECH4 Project Setup and .pk4 Packager
 
-This Python suite, created by [ALH477](https://github.com/ALH477), streamlines IDTECH4 engine development (e.g., Doom 3, Quake 4) with a modular set of tools, built to power [*PetaByte Madness™*](https://demod.ltd/petabytemadness.html) by [DeMoD LLC](https://demod.ltd) and shared to modernize IDTECH4 for all. Tailored for [DarkRadiant](https://www.darkradiant.net/), it offers project setup, asset packaging, and Git integration via a curses TUI, with external scripts for advanced features like main menu generation and asset organization. Licensed under MIT and GPL v3, it’s a FOSS beacon for IDTECH4’s niche.
+This Python suite, created by [ALH477](https://x.com/demodllc), streamlines IDTECH4 engine development (e.g., Doom 3, Quake 4) with a modular set of tools, built to power [*PetaByte Madness™*](https://demod.ltd/petabytemadness.html) by [DeMoD LLC](https://demod.ltd) and shared to modernize IDTECH4 for all. Tailored for [DarkRadiant](https://www.darkradiant.net/), it offers project setup, asset packaging, and Git integration via a curses TUI, with external scripts for advanced features like main menu generation and asset organization. Licensed under MIT and GPL v3, it’s a FOSS beacon for IDTECH4’s niche.
 
 ## Features
 - **Project Setup**: Creates a game directory with subfolders (`base`, `def`, `maps`, `models`, `textures`, `sounds`, `scripts`, `guis`) and placeholder files (`gamex86.dll`/`gamex86.so`, `game.config`) for DarkRadiant.
