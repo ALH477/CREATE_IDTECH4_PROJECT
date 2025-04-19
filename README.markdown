@@ -86,7 +86,8 @@ The `.pk4` file in `base/` packages assets for efficient engine loading.
    ```
 2. Navigate to the directory:
    ```bash
-   cd idtech4-project-packager
+   cd CREATE_IDTECH4_PROJECT
+
    ```
 3. Run the script:
    ```bash
