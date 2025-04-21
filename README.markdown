@@ -1,4 +1,5 @@
 # IDTECH4 Project Setup and .pk4 Packager
+![Screenshot from 2025-04-21 02-52-28](https://github.com/user-attachments/assets/ba10b13a-86ba-4544-87be-f42365e3a7da)
 
 This Python suite, created by [ALH477](https://x.com/demodllc), streamlines IDTECH4 engine development (e.g., Doom 3, Quake 4) with a modular set of tools, built to power [*PetaByte Madness™*](https://demod.ltd/petabytemadness.html) by [DeMoD LLC](https://demod.ltd) and shared to modernize IDTECH4 for all. Tailored for [DarkRadiant](https://www.darkradiant.net/), it offers project setup, asset packaging, and Git integration via a curses TUI, with external scripts for advanced features like main menu generation and asset organization. Licensed under MIT and GPL v3, it’s a FOSS beacon for IDTECH4’s niche.
 
