@@ -7,10 +7,16 @@ import platform
 import curses
 import time
 import threading
+import logging
+import re
 try:
     import windows_curses  # For Windows compatibility
 except ImportError:
     pass
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def check_git_installed():
     """
@@ -40,9 +46,9 @@ def run_git_command(cmd, cwd=None, timeout=60):
         subprocess.run(cmd, cwd=cwd, check=True, stderr=subprocess.STDOUT, timeout=timeout)
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        print(f"Error running command: {' '.join(cmd)}")
+        logger.error(f"Error running command: {' '.join(cmd)} - {e}")
         if hasattr(e, 'output'):
-            print(e.output.decode())
+            logger.error(e.output.decode())
         return False
 
 def check_subfolders(project_dir, expected_subfolders):
@@ -98,12 +104,14 @@ def create_subfolders(stdscr, project_dir, missing_subfolders):
                 stdscr.addstr(15, 0, "Press any key to continue...")
                 stdscr.refresh()
                 stdscr.getch()
+                logger.info(f"Created subfolders in {project_dir}: {missing_subfolders}")
                 return True
             except Exception as e:
                 stdscr.addstr(14, 0, f"Failed to create subfolders. Error: {e}")
                 stdscr.addstr(15, 0, "Press any key to continue...")
                 stdscr.refresh()
                 stdscr.getch()
+                logger.error(f"Failed to create subfolders in {project_dir}: {e}")
                 return False
         elif key in (ord('n'), ord('N')):
             stdscr.addstr(14, 0, "Please create subfolders manually and retry.")
@@ -151,12 +159,14 @@ def create_game_files(stdscr, project_dir):
                 stdscr.addstr(8, 0, "Press any key to continue...")
                 stdscr.refresh()
                 stdscr.getch()
+                logger.info(f"Created game files in {project_dir}: {missing_files}")
                 return True
             except Exception as e:
                 stdscr.addstr(7, 0, f"Failed to create files. Error: {e}")
                 stdscr.addstr(8, 0, "Press any key to continue...")
                 stdscr.refresh()
                 stdscr.getch()
+                logger.error(f"Failed to create game files in {project_dir}: {e}")
                 return False
         elif key in (ord('n'), ord('N')):
             stdscr.addstr(7, 0, "Please create files manually and retry.")
@@ -167,7 +177,7 @@ def create_game_files(stdscr, project_dir):
 
 def download_game_directory(stdscr, project_dir, default_repo="https://github.com/id-Software/DOOM-3.git"):
     """
-    Download the /neo/game directory with curses-based user input and percentage updates.
+    Download the /neo/game directory with curses-based user input and real progress updates.
     Args:
         stdscr: Curses screen object.
         project_dir (str): Path to the project directory.
@@ -194,6 +204,9 @@ def download_game_directory(stdscr, project_dir, default_repo="https://github.co
     stdscr.addstr(0, 0, f"Enter GitHub repo URL (Enter for default: {default_repo}): ")
     curses.echo()
     repo_url = stdscr.getstr(1, 0).decode().strip() or default_repo
+    if not repo_url.startswith('https://'):
+        repo_url = 'https://' + repo_url.lstrip('http://')
+        stdscr.addstr(2, 0, f"Adjusted to HTTPS: {repo_url}")
     stdscr.addstr(3, 0, "Enter branch name (default: master): ")
     branch = stdscr.getstr(4, 0).decode().strip() or "master"
     stdscr.addstr(6, 0, "Enter path for /neo/game (relative, e.g., game): ")
@@ -219,56 +232,52 @@ def download_game_directory(stdscr, project_dir, default_repo="https://github.co
     stdscr.addstr(0, 0, "Cloning /neo/game from GitHub... 0%")
     stdscr.refresh()
     
-    # Percentage updates at 25% intervals
-    progress = 0
     success = False
     error_msg = None
-    temp_dir = tempfile.mkdtemp()
     
-    def run_clone():
-        nonlocal success, error_msg
+    with tempfile.TemporaryDirectory() as temp_dir:
         try:
             if not run_git_command(["git", "init"], cwd=temp_dir) or \
                not run_git_command(["git", "config", "core.sparseCheckout", "true"], cwd=temp_dir):
                 error_msg = "Failed to configure Git."
-                return
+                raise Exception(error_msg)
             with open(os.path.join(temp_dir, ".git", "info", "sparse-checkout"), "w") as f:
                 f.write("neo/game/\n")
-            if not run_git_command(["git", "remote", "add", "origin", repo_url], cwd=temp_dir) or \
-               not run_git_command(["git", "pull", "origin", branch], cwd=temp_dir, timeout=120):
-                error_msg = "Failed to download repository."
-                return
+            if not run_git_command(["git", "remote", "add", "origin", repo_url], cwd=temp_dir):
+                error_msg = "Failed to add remote."
+                raise Exception(error_msg)
+            
+            # Run git pull with Popen for real-time output
+            cmd = ["git", "pull", "origin", branch]
+            process = subprocess.Popen(cmd, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            progress = 0
+            progress_re = re.compile(r'Receiving objects:\s*(\d+)%')
+            for line in iter(process.stdout.readline, ''):
+                stdscr.addstr(1, 0, line.strip()[:curses.COLS-1])  # Display last line
+                match = progress_re.search(line)
+                if match:
+                    new_progress = int(match.group(1))
+                    if new_progress > progress:
+                        progress = new_progress
+                        stdscr.addstr(0, 0, f"Cloning /neo/game from GitHub... {progress}%")
+                stdscr.refresh()
+            process.wait()
+            if process.returncode != 0:
+                error_msg = "Failed to pull repository."
+                raise Exception(error_msg)
+            
             game_dir = os.path.join(temp_dir, "neo", "game")
             if not os.path.isdir(game_dir):
                 error_msg = "/neo/game directory not found in repository."
-                return
+                raise Exception(error_msg)
             if os.path.exists(destination_path):
                 shutil.rmtree(destination_path)
             shutil.copytree(game_dir, destination_path)
             success = True
+            logger.info(f"Downloaded /neo/game to {destination_path}")
         except Exception as e:
             error_msg = f"Failed to download /neo/game. Error: {e}"
-    
-    # Start cloning in a separate thread
-    clone_thread = threading.Thread(target=run_clone)
-    clone_thread.start()
-    
-    # Display percentage updates at 25% intervals
-    start_time = time.time()
-    last_percent = 0
-    while clone_thread.is_alive():
-        elapsed = time.time() - start_time
-        progress = min(int(elapsed * 10), 100)  # Fake progress: 10% per second, max 100%
-        current_percent = (progress // 25) * 25  # Round down to nearest 25%
-        if current_percent > last_percent and current_percent in [25, 50, 75, 100]:
-            last_percent = current_percent
-            stdscr.clear()
-            stdscr.addstr(0, 0, f"Cloning /neo/game from GitHub... {current_percent}%")
-            stdscr.refresh()
-        time.sleep(0.1)
-    
-    clone_thread.join()
-    shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.error(error_msg)
     
     stdscr.clear()
     if success:
@@ -340,12 +349,14 @@ def initialize_git_repo(stdscr, project_dir):
         stdscr.addstr(4, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
+        logger.info(f"Initialized Git repo in {project_dir}")
         return True
     except Exception as e:
         stdscr.addstr(2, 0, f"Failed to initialize Git repo. Error: {e}")
         stdscr.addstr(3, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
+        logger.error(f"Failed to initialize Git repo in {project_dir}: {e}")
         return False
 
 def print_platform_instructions(stdscr):
@@ -382,6 +393,21 @@ def print_platform_instructions(stdscr):
     stdscr.refresh()
     stdscr.getch()
 
+def validate_project_dir(project_dir):
+    """
+    Validate if the project directory is a subdirectory of current working dir.
+    Args:
+        project_dir (str): Path to validate.
+    Returns:
+        str: Absolute path if valid, None otherwise.
+    """
+    abs_path = os.path.abspath(project_dir)
+    cwd = os.getcwd()
+    if not abs_path.startswith(cwd):
+        logger.warning(f"Project dir {project_dir} is not a subdirectory of {cwd}")
+        return None
+    return abs_path
+
 def setup_project(stdscr):
     """
     Set up a new IDTECH4 project with curses-based input.
@@ -394,8 +420,15 @@ def setup_project(stdscr):
     stdscr.addstr(0, 0, "--- Setting Up a New Project ---")
     stdscr.addstr(2, 0, "Enter project directory path (e.g., MyGame): ")
     curses.echo()
-    project_dir = stdscr.getstr(3, 0).decode().strip()
+    project_dir_input = stdscr.getstr(3, 0).decode().strip()
     curses.noecho()
+    project_dir = validate_project_dir(project_dir_input)
+    if project_dir is None:
+        stdscr.addstr(5, 0, "Invalid project directory: Must be relative to current working directory.")
+        stdscr.addstr(6, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
     if not os.path.exists(project_dir):
         stdscr.addstr(5, 0, f"{project_dir} does not exist. Create it? (y/n): ")
         stdscr.refresh()
@@ -408,12 +441,14 @@ def setup_project(stdscr):
                     stdscr.addstr(8, 0, "Press any key to continue...")
                     stdscr.refresh()
                     stdscr.getch()
+                    logger.info(f"Created project directory: {project_dir}")
                     break
                 except Exception as e:
                     stdscr.addstr(7, 0, f"Failed to create directory. Error: {e}")
                     stdscr.addstr(8, 0, "Press any key to continue...")
                     stdscr.refresh()
                     stdscr.getch()
+                    logger.error(f"Failed to create project directory {project_dir}: {e}")
                     return False
             elif key in (ord('n'), ord('N')):
                 stdscr.addstr(7, 0, "Please enter a valid directory path.")
@@ -455,8 +490,15 @@ def generate_pk4(stdscr):
     stdscr.addstr(0, 0, "--- Generating a .pk4 File ---")
     stdscr.addstr(2, 0, "Enter project directory path: ")
     curses.echo()
-    project_dir = stdscr.getstr(3, 0).decode().strip()
+    project_dir_input = stdscr.getstr(3, 0).decode().strip()
     curses.noecho()
+    project_dir = validate_project_dir(project_dir_input)
+    if project_dir is None:
+        stdscr.addstr(5, 0, "Invalid project directory: Must be relative to current working directory.")
+        stdscr.addstr(6, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
     if not os.path.exists(project_dir):
         stdscr.addstr(5, 0, f"Error: {project_dir} does not exist.")
         stdscr.addstr(6, 0, "Press any key to continue...")
@@ -476,15 +518,25 @@ def generate_pk4(stdscr):
     if not pk4_name.endswith('.pk4'):
         pk4_name += '.pk4'
     stdscr.addstr(8, 0, f"Enter output path for .pk4 (Enter for default '{asset_dir}'): ")
-    output_path = stdscr.getstr(9, 0).decode().strip()
-    output_path = os.path.join(asset_dir, pk4_name) if not output_path else os.path.join(output_path, pk4_name)
+    output_path_input = stdscr.getstr(9, 0).decode().strip()
+    output_path = os.path.join(asset_dir, pk4_name) if not output_path_input else validate_project_dir(output_path_input)
+    if output_path is None:
+        stdscr.addstr(10, 0, "Invalid output path.")
+        stdscr.addstr(11, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
+    output_path = os.path.join(output_path, pk4_name) if output_path_input else output_path
     curses.noecho()
+    exclude_dirs = ['.git', '__pycache__', '.DS_Store']
+    exclude_exts = ['.bak', '.tmp', '.log']
     try:
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             file_count = 0
-            for root, _, files in os.walk(asset_dir):
+            for root, dirs, files in os.walk(asset_dir):
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
                 for file in files:
-                    if file.endswith(('.bak', '.tmp', '.log')):
+                    if any(file.endswith(ext) for ext in exclude_exts):
                         continue
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, asset_dir)
@@ -494,12 +546,14 @@ def generate_pk4(stdscr):
         stdscr.addstr(12, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
+        logger.info(f"Generated PK4: {output_path} with {file_count} files")
         return True
     except Exception as e:
         stdscr.addstr(11, 0, f"Failed to create .pk4. Error: {e}")
         stdscr.addstr(12, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
+        logger.error(f"Failed to generate PK4 {output_path}: {e}")
         return False
 
 # Placeholder functions for future external scripts (commented out)
@@ -623,10 +677,11 @@ def curses_menu(stdscr):
                 stdscr.clear()
                 stdscr.addstr(0, 0, "Enter project directory path: ")
                 curses.echo()
-                project_dir = stdscr.getstr(1, 0).decode().strip()
+                project_dir_input = stdscr.getstr(1, 0).decode().strip()
                 curses.noecho()
-                if not os.path.exists(project_dir):
-                    stdscr.addstr(3, 0, f"Error: {project_dir} does not exist.")
+                project_dir = validate_project_dir(project_dir_input)
+                if project_dir is None or not os.path.exists(project_dir):
+                    stdscr.addstr(3, 0, f"Error: Invalid or non-existent directory: {project_dir_input}")
                     stdscr.addstr(4, 0, "Press any key to continue...")
                     stdscr.refresh()
                     stdscr.getch()
@@ -655,7 +710,20 @@ def main():
     try:
         curses.wrapper(curses_menu)
     except Exception as e:
-        print(f"Error running curses TUI: {e}")
+        logger.error(f"Error running curses TUI: {e}")
+        print(f"Error running TUI: {e}. Falling back to command-line mode.")
+        # Simple fallback menu
+        print("Welcome to IDTECH4 Project Manager (Fallback Mode)")
+        print("1. Set up a new project")
+        print("2. Generate a .pk4 file")
+        print("3. Initialize Git repo for /game")
+        print("4. Exit")
+        choice = input("Enter choice: ")
+        if choice == '1':
+            project_dir = input("Enter project directory: ")
+            # Implement simplified logic without curses
+            print("Setup not fully supported in fallback. Please use TUI.")
+        # Add similar for others
         input("Press Enter to exit...")
 
 if __name__ == "__main__":
