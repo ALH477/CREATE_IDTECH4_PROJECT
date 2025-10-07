@@ -179,7 +179,6 @@ DTech enhances IDTech4 with:
 - **DeMoD Communications Framework (DCF) Integration**: Replaces legacy UDP networking with DCF's low-latency, modular, P2P-enabled system supporting gRPC, UDP, and plugins for IoT/gaming interoperability.
 - **StreamDB Asset Loading**: Substitutes traditional `.pk4` ZIP files with StreamDB, a page-based database for efficient, versioned asset storage with reverse trie indexing, Snappy compression, and streaming reads—optimized for embedded systems, servers, and cross-platform use.
 - **Advanced Audio System**: Improves entity-based audio modes, DSP drivers, and sound processing for immersive horror FPS experiences, with robust error handling and dynamic mode switching based on proximity.
-- **Export Compliance and Openness**: Ensures GPL-3.0 licensing, avoids encryption for EAR/ITAR compliance, and structures repositories for scalability across platforms (e.g., WASM compatibility).
 
 This modernization transforms IDTech4 into a versatile engine for modern applications, blending retro gaming with cutting-edge tech for low-latency, fault-tolerant systems in music, IoT, and Web3.
 
