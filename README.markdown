@@ -173,7 +173,7 @@ The Python script implements a simplified version of StreamDB for packaging, whi
 - **Windows**: Use Visual Studio to build `gamex86.dll` from `neo/doom.sln`.
 
 ## DeMoD LLC's Modernization of IDTech4 into DTech
-DeMoD LLC, founded by the self-taught 22-year-old Asher LeRoy, is a bootstrapped IT/audio company specializing in real-time audio effects, generative FX, and Web3 asset trading for musicians, with a focus on empowering creators in Japan through AI, blockchain, and open-source tools. As part of their mission to democratize advanced technology, DeMoD has modernized the IDTech4 engine (from Doom 3) into a custom fork called DTech.
+DeMoD LLC, founded by the self-taught 22-year-old Asher LeRoy, is a bootstrapped IT/audio company specializing in real-time audio effects, generative FX, and Web3 asset trading for musicians, with a focus on empowering creators through AI tools, blockchain, and open-source tools. As part of their mission to democratize advanced technology, DeMoD has modernized the IDTech4 engine (from Doom 3) into a custom fork called DTech.
 
 DTech enhances IDTech4 with:
 - **DeMoD Communications Framework (DCF) Integration**: Replaces legacy UDP networking with DCF's low-latency, modular, P2P-enabled system supporting gRPC, UDP, and plugins for IoT/gaming interoperability.
