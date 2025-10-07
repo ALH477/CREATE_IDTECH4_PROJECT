@@ -142,6 +142,11 @@ nix develop
 
 The `.pk4` file (ZIP-based) or `.sdb` file (StreamDb format with path indexing and optional compression) in `base/` packages assets for efficient engine loading.
 
+## StreamDB Integration
+StreamDB is a custom, page-based, file-backed database designed for efficient asset storage and retrieval in IDTECH4 projects. It supports binary document storage with UUID indexing, path-based searches via a reverse trie, optional Snappy compression, and chained pages for large files. The script's TUI includes a ".sdb generation" option to package assets from the `base/` directory into a `.sdb` file, providing an alternative to `.pk4` with features like quick mode (skipping CRC checks for speed) and transaction support (in the full Rust implementation). This enables scalable, low-overhead asset management, particularly useful for real-time engines like IDTECH4.
+
+The Python script implements a simplified version of StreamDB for packaging, while the full Rust implementation (integrated via FFI in IDTECH4 forks) adds advanced features like memory-mapped I/O, LRU caching, free lists, and recovery. StreamDB is part of DeMoD LLC's ecosystem, enhancing persistence in the DeMoD-LISP SDK and DCF for IoT, gaming, and multimedia applications.
+
 ## Usage
 1. Clone the repository:
    ```bash
@@ -166,6 +171,18 @@ The `.pk4` file (ZIP-based) or `.sdb` file (StreamDb format with path indexing a
 ## Compilation
 - **Linux/macOS**: Use `cmake` and `make` for `gamex86.so`.
 - **Windows**: Use Visual Studio to build `gamex86.dll` from `neo/doom.sln`.
+
+## DeMoD LLC's Modernization of IDTech4 into DTech
+DeMoD LLC, founded by the self-taught 22-year-old Asher LeRoy, is a bootstrapped IT/audio company specializing in real-time audio effects, generative FX, and Web3 asset trading for musicians, with a focus on empowering creators in Japan through AI, blockchain, and open-source tools. As part of their mission to democratize advanced technology, DeMoD has modernized the IDTech4 engine (from Doom 3) into a custom fork called DTech.
+
+DTech enhances IDTech4 with:
+- **DeMoD Communications Framework (DCF) Integration**: Replaces legacy UDP networking with DCF's low-latency, modular, P2P-enabled system supporting gRPC, UDP, and plugins for IoT/gaming interoperability.
+- **StreamDB Asset Loading**: Substitutes traditional `.pk4` ZIP files with StreamDB, a page-based database for efficient, versioned asset storage with reverse trie indexing, Snappy compression, and streaming reads—optimized for embedded systems, servers, and cross-platform use.
+- **Advanced Audio System**: Improves entity-based audio modes, DSP drivers, and sound processing for immersive horror FPS experiences, with robust error handling and dynamic mode switching based on proximity.
+- **Blockchain and AI Features**: Incorporates Generative FX for real-time audio generation, Blockchain DRM for secure asset trading, and FOSH (Free and Open-Source Hardware) like the EchoForge DSP (a USB-C guitar device) for music creation/collaboration.
+- **Export Compliance and Openness**: Ensures GPL-3.0 licensing, avoids encryption for EAR/ITAR compliance, and structures repositories for scalability across platforms (e.g., WASM compatibility).
+
+This modernization transforms IDTech4 into a versatile engine for modern applications, blending retro gaming with cutting-edge tech for low-latency, fault-tolerant systems in music, IoT, and Web3.
 
 ## FOSS Compliance
 Doom 3 `/neo/game` is licensed under GPL v3. Modifications must be open-source and shared if distributed.
