@@ -9,21 +9,248 @@ import time
 import threading
 import logging
 import re
+import queue
 try:
     import windows_curses  # For Windows compatibility
 except ImportError:
     pass
 
+import struct
+import snappy
+import uuid
+import hashlib
+import binascii
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+MAGIC = b'\x55\xAA\xFE\xED\xFA\xCE\xDA\x7A'
+PAGE_SIZE = 4096
+PAGE_HEADER_SIZE = 32
+FLAG_DATA_PAGE = 0x01
+FLAG_TRIE_PAGE = 0x02
+FLAG_FREE_LIST_PAGE = 0x04
+FLAG_INDEX_PAGE = 0x08
+HEADER_SIZE = 8 + 3 * (8 + 4)  # MAGIC + 3*(i64 + i32)
+
+class ReverseTrieNode:
+    def __init__(self, edge='', parent_page_id=-1, self_page_id=-1, document_id=None, children=None):
+        self.edge = edge
+        self.parent_page_id = parent_page_id
+        self.self_page_id = self_page_id
+        self.document_id = document_id
+        self.children = children or {}
+
+class Document:
+    def __init__(self, id, first_page_id, current_version=0, paths=None):
+        self.id = id
+        self.first_page_id = first_page_id
+        self.current_version = current_version
+        self.paths = paths or []
+
+class StreamDb:
+    def __init__(self, path, use_compression=True):
+        self.file = open(path, 'wb+')
+        self.use_compression = use_compression
+        self.page_size = PAGE_SIZE
+        self.page_header_size = PAGE_HEADER_SIZE
+        self.current_page_id = 0
+        self.documents = {}  # uuid to Document
+        self.trie_root_page_id = -1
+        self.index_page_id = -1
+        self._write_initial_header()
+
+    def _write_initial_header(self):
+        self.file.seek(0)
+        self.file.write(MAGIC)
+        self.file.write(struct.pack('<q i q i q i', -1, 0, -1, 0, -1, 0))
+        self.file.flush()
+
+    def allocate_page(self):
+        page_id = self.current_page_id
+        self.current_page_id += 1
+        return page_id
+
+    def write_raw_page(self, page_id, data, flags, version=0, prev_page_id=-1, next_page_id=-1):
+        compressed = snappy.compress(data) if self.use_compression else data
+        crc = binascii.crc32(compressed) & 0xffffffff
+        data_length = len(compressed)
+        header = struct.pack('<I i q q B i B B B', crc, version, prev_page_id, next_page_id, flags, data_length, 0, 0, 0)
+        offset = HEADER_SIZE + page_id * self.page_size
+        self.file.seek(offset)
+        self.file.write(header)
+        self.file.write(compressed)
+        self.file.flush()
+
+    def write_document(self, path, data):
+        id = uuid.uuid4()
+        first_page_id = -1
+        prev_page_id = -1
+        data_pos = 0
+        max_chunk = self.page_size - self.page_header_size
+        while data_pos < len(data):
+            chunk_end = min(data_pos + max_chunk, len(data))
+            chunk = data[data_pos:chunk_end]
+            page_id = self.allocate_page()
+            next_page_id = -1 if chunk_end == len(data) else self.allocate_page()
+            self.write_raw_page(page_id, chunk, FLAG_DATA_PAGE, 0, prev_page_id, next_page_id)
+            if first_page_id == -1:
+                first_page_id = page_id
+            prev_page_id = page_id
+            data_pos = chunk_end
+        doc = Document(id, first_page_id, 0, [path])
+        self.documents[id] = doc
+        self._trie_insert(path, id)
+
+    def _trie_insert(self, path, doc_id):
+        reversed_path = path[::-1]
+        if self.trie_root_page_id == -1:
+            self.trie_root_page_id = self.allocate_page()
+            root_node = ReverseTrieNode('', -1, self.trie_root_page_id)
+            self._write_trie_node(self.trie_root_page_id, root_node)
+        current = self.trie_root_page_id
+        remaining = reversed_path
+        while remaining:
+            node = self._read_trie_node(current)
+            edge = node.edge
+            common = 0
+            min_len = min(len(remaining), len(edge))
+            while common < min_len and remaining[common] == edge[common]:
+                common += 1
+            if common == len(edge):
+                remaining = remaining[common:]
+                if not remaining:
+                    node.document_id = doc_id
+                    self._write_trie_node(current, node)
+                    return
+                ch = remaining[0]
+                if ch in node.children:
+                    current = node.children[ch]
+                else:
+                    new_page = self.allocate_page()
+                    new_node = ReverseTrieNode(remaining[1:], current, new_page, doc_id if len(remaining) == 1 else None)
+                    self._write_trie_node(new_page, new_node)
+                    node.children[ch] = new_page
+                    self._write_trie_node(current, node)
+                    return
+            elif common == 0:
+                ch = remaining[0]
+                new_page = self.allocate_page()
+                new_node = ReverseTrieNode(remaining[1:], current, new_page, doc_id if len(remaining) == 1 else None)
+                self._write_trie_node(new_page, new_node)
+                node.children[ch] = new_page
+                self._write_trie_node(current, node)
+                return
+            else:
+                # Split node
+                split_node = ReverseTrieNode(edge[:common], node.parent_page_id, current, None, {edge[common]: node.self_page_id})
+                suffix_page = self.allocate_page()
+                suffix_node = ReverseTrieNode(edge[common:], current, suffix_page, node.document_id, node.children)
+                self._write_trie_node(suffix_page, suffix_node)
+                split_node.children[edge[common]] = suffix_page
+                if node.parent_page_id != -1:
+                    parent = self._read_trie_node(node.parent_page_id)
+                    for k in list(parent.children.keys()):
+                        if parent.children[k] == current:
+                            parent.children[k] = current  # unchanged
+                    self._write_trie_node(node.parent_page_id, parent)
+                self._write_trie_node(current, split_node)
+                remaining = remaining[common:]
+                if not remaining:
+                    split_node.document_id = doc_id
+                    self._write_trie_node(current, split_node)
+                    return
+                ch = remaining[0]
+                new_page = self.allocate_page()
+                new_node = ReverseTrieNode(remaining[1:], current, new_page, doc_id if len(remaining) == 1 else None)
+                self._write_trie_node(new_page, new_node)
+                split_node.children[ch] = new_page
+                self._write_trie_node(current, split_node)
+                return
+
+    def _serialize_trie_node(self, node):
+        buf = b''
+        edge_bytes = node.edge.encode('utf-8')
+        buf += struct.pack('<i', len(edge_bytes))
+        buf += edge_bytes
+        buf += struct.pack('<q', node.parent_page_id)
+        buf += struct.pack('<q', node.self_page_id)
+        buf += struct.pack('<i', 1 if node.document_id else 0)
+        if node.document_id:
+            buf += node.document_id.bytes
+        buf += struct.pack('<i', len(node.children))
+        for ch, child_id in sorted(node.children.items()):
+            buf += ch.encode('utf-8')
+            buf += struct.pack('<q', child_id)
+        return buf
+
+    def _deserialize_trie_node(self, data):
+        reader = 0
+        edge_len = struct.unpack_from('<i', data, reader)[0]
+        reader += 4
+        edge = data[reader:reader + edge_len].decode('utf-8')
+        reader += edge_len
+        parent = struct.unpack_from('<q', data, reader)[0]
+        reader += 8
+        self_id = struct.unpack_from('<q', data, reader)[0]
+        reader += 8
+        has_doc = struct.unpack_from('<i', data, reader)[0]
+        reader += 4
+        doc_id = None
+        if has_doc:
+            doc_id = uuid.UUID(bytes=data[reader:reader + 16])
+            reader += 16
+        child_count = struct.unpack_from('<i', data, reader)[0]
+        reader += 4
+        children = {}
+        for _ in range(child_count):
+            ch = data[reader:reader + 1].decode('utf-8')
+            reader += 1
+            child_id = struct.unpack_from('<q', data, reader)[0]
+            reader += 8
+            children[ch] = child_id
+        return ReverseTrieNode(edge, parent, self_id, doc_id, children)
+
+    def _write_trie_node(self, page_id, node):
+        data = self._serialize_trie_node(node)
+        self.write_raw_page(page_id, data, FLAG_TRIE_PAGE)
+
+    def _read_trie_node(self, page_id):
+        offset = HEADER_SIZE + page_id * self.page_size + self.page_header_size
+        self.file.seek(offset)
+        compressed = self.file.read(self.page_size - self.page_header_size)
+        data = snappy.decompress(compressed) if self.use_compression else compressed
+        return self._deserialize_trie_node(data)
+
+    def close(self):
+        # Write index
+        self.index_page_id = self.allocate_page()
+        serialized_index = self._serialize_index()
+        self.write_raw_page(self.index_page_id, serialized_index, FLAG_INDEX_PAGE)
+        # Update header
+        self.file.seek(len(MAGIC))
+        self.file.write(struct.pack('<q i', self.index_page_id, 0))
+        self.file.write(struct.pack('<q i', self.trie_root_page_id, 0))
+        self.file.write(struct.pack('<q i', -1, 0))
+        self.file.flush()
+        self.file.close()
+
+    def _serialize_index(self):
+        buf = b''
+        buf += struct.pack('<i', len(self.documents))
+        for id, doc in sorted(self.documents.items(), key=lambda x: x[0]):
+            buf += doc.id.bytes
+            buf += struct.pack('<q', doc.first_page_id)
+            buf += struct.pack('<i', doc.current_version)
+            buf += struct.pack('<i', len(doc.paths))
+            for p in doc.paths:
+                p_bytes = p.encode('utf-8')
+                buf += struct.pack('<i', len(p_bytes))
+                buf += p_bytes
+        return buf
+
 def check_git_installed():
-    """
-    Check if Git is installed on the system.
-    Returns:
-        bool: True if Git is installed, False otherwise.
-    """
     try:
         subprocess.check_output(["git", "--version"], stderr=subprocess.STDOUT)
         return True
@@ -33,15 +260,6 @@ def check_git_installed():
         return False
 
 def run_git_command(cmd, cwd=None, timeout=60):
-    """
-    Run a Git command with error handling and timeout.
-    Args:
-        cmd (list): List of command arguments.
-        cwd (str): Working directory for the command.
-        timeout (int): Timeout in seconds.
-    Returns:
-        bool: True if successful, False otherwise.
-    """
     try:
         subprocess.run(cmd, cwd=cwd, check=True, stderr=subprocess.STDOUT, timeout=timeout)
         return True
@@ -52,14 +270,6 @@ def run_git_command(cmd, cwd=None, timeout=60):
         return False
 
 def check_subfolders(project_dir, expected_subfolders):
-    """
-    Check if the project directory contains the required subfolders.
-    Args:
-        project_dir (str): Path to the project directory.
-        expected_subfolders (list): List of required subfolders.
-    Returns:
-        list: Missing subfolders, if any.
-    """
     missing = []
     for sub in expected_subfolders:
         sub_path = os.path.join(project_dir, sub)
@@ -68,15 +278,6 @@ def check_subfolders(project_dir, expected_subfolders):
     return missing
 
 def create_subfolders(stdscr, project_dir, missing_subfolders):
-    """
-    Create missing subfolders with curses-based user input.
-    Args:
-        stdscr: Curses screen object.
-        project_dir (str): Path to the project directory.
-        missing_subfolders (list): List of missing subfolders.
-    Returns:
-        bool: True if subfolders were created or none were missing, False if user declined.
-    """
     if not missing_subfolders:
         return True
     
@@ -121,14 +322,6 @@ def create_subfolders(stdscr, project_dir, missing_subfolders):
             return False
 
 def create_game_files(stdscr, project_dir):
-    """
-    Create placeholder game files with curses-based user input.
-    Args:
-        stdscr: Curses screen object.
-        project_dir (str): Path to the project directory.
-    Returns:
-        bool: True if files were created or exist, False if user declined or error occurred.
-    """
     os_type = platform.system()
     game_binary = 'gamex86.dll' if os_type == 'Windows' else 'gamex86.so'
     game_files = [
@@ -176,15 +369,6 @@ def create_game_files(stdscr, project_dir):
             return False
 
 def download_game_directory(stdscr, project_dir, default_repo="https://github.com/id-Software/DOOM-3.git"):
-    """
-    Download the /neo/game directory with curses-based user input and real progress updates.
-    Args:
-        stdscr: Curses screen object.
-        project_dir (str): Path to the project directory.
-        default_repo (str): Default repository URL (Doom 3 source code).
-    Returns:
-        bool: True if successful or skipped, False if failed.
-    """
     stdscr.clear()
     stdscr.addstr(0, 0, "Download /neo/game directory from GitHub? (y/n): ")
     stdscr.refresh()
@@ -229,7 +413,7 @@ def download_game_directory(stdscr, project_dir, default_repo="https://github.co
                 return True
     
     stdscr.clear()
-    stdscr.addstr(0, 0, "Cloning /neo/game from GitHub... 0%")
+    stdscr.addstr(0, 0, "Cloning /neo/game from GitHub...   0%")
     stdscr.refresh()
     
     success = False
@@ -250,17 +434,47 @@ def download_game_directory(stdscr, project_dir, default_repo="https://github.co
             # Run git pull with Popen for real-time output
             cmd = ["git", "pull", "origin", branch]
             process = subprocess.Popen(cmd, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            
+            q = queue.Queue()
+            def read_output():
+                for line in iter(process.stdout.readline, ''):
+                    q.put(line)
+                q.put(None)  # Sentinel for end
+            thread = threading.Thread(target=read_output)
+            thread.start()
+            
+            animation_running = True
+            spinner_chars = ['|', '/', '-', '\\']
+            spinner_idx = 0
             progress = 0
+            last_line = ""
             progress_re = re.compile(r'Receiving objects:\s*(\d+)%')
-            for line in iter(process.stdout.readline, ''):
-                stdscr.addstr(1, 0, line.strip()[:curses.COLS-1])  # Display last line
-                match = progress_re.search(line)
-                if match:
-                    new_progress = int(match.group(1))
-                    if new_progress > progress:
-                        progress = new_progress
-                        stdscr.addstr(0, 0, f"Cloning /neo/game from GitHub... {progress}%")
+            
+            while animation_running:
+                try:
+                    line = q.get(timeout=0.2)
+                    if line is None:
+                        animation_running = False
+                        break
+                    last_line = line.strip()[:curses.COLS-1]
+                    stdscr.addstr(1, 0, " " * (curses.COLS - 1))  # Clear line
+                    stdscr.addstr(1, 0, last_line)
+                    match = progress_re.search(line)
+                    if match:
+                        new_progress = int(match.group(1))
+                        if new_progress > progress:
+                            progress = new_progress
+                except queue.Empty:
+                    pass
+                
+                # Update spinner and progress
+                stdscr.addstr(0, 0, " " * (curses.COLS - 1))  # Clear status line
+                status = f"Cloning /neo/game from GitHub... {spinner_chars[spinner_idx]} {progress}%"
+                stdscr.addstr(0, 0, status)
                 stdscr.refresh()
+                spinner_idx = (spinner_idx + 1) % len(spinner_chars)
+            
+            thread.join()
             process.wait()
             if process.returncode != 0:
                 error_msg = "Failed to pull repository."
@@ -291,14 +505,6 @@ def download_game_directory(stdscr, project_dir, default_repo="https://github.co
     return success
 
 def initialize_git_repo(stdscr, project_dir):
-    """
-    Initialize a Git repository for /game directory with curses-based input.
-    Args:
-        stdscr: Curses screen object.
-        project_dir (str): Path to the project directory.
-    Returns:
-        bool: True if successful, False if failed.
-    """
     stdscr.clear()
     stdscr.addstr(0, 0, "Initialize Git repo for /game directory only? (y/n): ")
     stdscr.refresh()
@@ -360,11 +566,6 @@ def initialize_git_repo(stdscr, project_dir):
         return False
 
 def print_platform_instructions(stdscr):
-    """
-    Print platform-specific setup instructions.
-    Args:
-        stdscr: Curses screen object.
-    """
     os_type = platform.system()
     stdscr.clear()
     stdscr.addstr(0, 0, "Platform-Specific Setup Instructions:")
@@ -394,13 +595,6 @@ def print_platform_instructions(stdscr):
     stdscr.getch()
 
 def validate_project_dir(project_dir):
-    """
-    Validate if the project directory is a subdirectory of current working dir.
-    Args:
-        project_dir (str): Path to validate.
-    Returns:
-        str: Absolute path if valid, None otherwise.
-    """
     abs_path = os.path.abspath(project_dir)
     cwd = os.getcwd()
     if not abs_path.startswith(cwd):
@@ -409,13 +603,6 @@ def validate_project_dir(project_dir):
     return abs_path
 
 def setup_project(stdscr):
-    """
-    Set up a new IDTECH4 project with curses-based input.
-    Args:
-        stdscr: Curses screen object.
-    Returns:
-        bool: True if successful, False if failed.
-    """
     stdscr.clear()
     stdscr.addstr(0, 0, "--- Setting Up a New Project ---")
     stdscr.addstr(2, 0, "Enter project directory path (e.g., MyGame): ")
@@ -479,13 +666,6 @@ def setup_project(stdscr):
     return True
 
 def generate_pk4(stdscr):
-    """
-    Generate a .pk4 file with curses-based input.
-    Args:
-        stdscr: Curses screen object.
-    Returns:
-        bool: True if successful, False if failed.
-    """
     stdscr.clear()
     stdscr.addstr(0, 0, "--- Generating a .pk4 File ---")
     stdscr.addstr(2, 0, "Enter project directory path: ")
@@ -556,82 +736,99 @@ def generate_pk4(stdscr):
         logger.error(f"Failed to generate PK4 {output_path}: {e}")
         return False
 
-# Placeholder functions for future external scripts (commented out)
-"""
-def convert_assets(stdscr):
-    # Placeholder for asset conversion tool (e.g., PNG to .dds, FBX to .md5mesh)
+def generate_sdb(stdscr):
     stdscr.clear()
-    stdscr.addstr(0, 0, "--- Converting Assets ---")
-    stdscr.addstr(2, 0, "Not implemented yet. Check future commits!")
-    stdscr.addstr(3, 0, "Press any key to continue...")
+    stdscr.addstr(0, 0, "--- Generating a .sdb File ---")
+    stdscr.addstr(2, 0, "Enter project directory path: ")
+    curses.echo()
+    project_dir_input = stdscr.getstr(3, 0).decode().strip()
+    curses.noecho()
+    project_dir = validate_project_dir(project_dir_input)
+    if project_dir is None:
+        stdscr.addstr(5, 0, "Invalid project directory: Must be relative to current working directory.")
+        stdscr.addstr(6, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
+    if not os.path.exists(project_dir):
+        stdscr.addstr(5, 0, f"Error: {project_dir} does not exist.")
+        stdscr.addstr(6, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
+    asset_dir = os.path.join(project_dir, 'base')
+    if not os.path.exists(asset_dir):
+        stdscr.addstr(5, 0, f"Error: {asset_dir} does not exist.")
+        stdscr.addstr(6, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
+    stdscr.addstr(5, 0, "Enter .sdb file name (e.g., mygame.sdb): ")
+    curses.echo()
+    sdb_name = stdscr.getstr(6, 0).decode().strip()
+    if not sdb_name.endswith('.sdb'):
+        sdb_name += '.sdb'
+    stdscr.addstr(8, 0, f"Enter output path for .sdb (Enter for default '{asset_dir}'): ")
+    output_path_input = stdscr.getstr(9, 0).decode().strip()
+    output_dir = validate_project_dir(output_path_input) if output_path_input else asset_dir
+    if output_dir is None:
+        stdscr.addstr(10, 0, "Invalid output path.")
+        stdscr.addstr(11, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        return False
+    output_path = os.path.join(output_dir, sdb_name)
+    stdscr.addstr(11, 0, "Use compression? (y/n): ")
     stdscr.refresh()
-    stdscr.getch()
-    return False
-
-def generate_scripts(stdscr):
-    # Placeholder for script generation tool (e.g., .script files for weapons, AI)
-    stdscr.clear()
-    stdscr.addstr(0, 0, "--- Generating Scripts ---")
-    stdscr.addstr(2, 0, "Not implemented yet. Check future commits!")
-    stdscr.addstr(3, 0, "Press any key to continue...")
-    stdscr.refresh()
-    stdscr.getch()
-    return False
-
-def edit_maps(stdscr):
-    # Placeholder for map editing tool (e.g., procedural .map generation)
-    stdscr.clear()
-    stdscr.addstr(0, 0, "--- Editing Maps ---")
-    stdscr.addstr(2, 0, "Not implemented yet. Check future commits!")
-    stdscr.addstr(3, 0, "Press any key to continue...")
-    stdscr.refresh()
-    stdscr.getch()
-    return False
-
-def manage_entities(stdscr):
-    # Placeholder for entity management tool (e.g., .def file editing)
-    stdscr.clear()
-    stdscr.addstr(0, 0, "--- Managing Entities ---")
-    stdscr.addstr(2, 0, "Not implemented yet. Check future commits!")
-    stdscr.addstr(3, 0, "Press any key to continue...")
-    stdscr.refresh()
-    stdscr.getch()
-    return False
-
-def build_binary(stdscr):
-    # Placeholder for build automation tool (e.g., compile gamex86.so/.dll)
-    stdscr.clear()
-    stdscr.addstr(0, 0, "--- Building Binary ---")
-    stdscr.addstr(2, 0, "Not implemented yet. Check future commits!")
-    stdscr.addstr(3, 0, "Press any key to continue...")
-    stdscr.refresh()
-    stdscr.getch()
-    return False
-"""
+    while True:
+        key = stdscr.getch()
+        if key in (ord('y'), ord('Y'), ord('n'), ord('N')):
+            use_compression = key in (ord('y'), ord('Y'))
+            break
+    curses.noecho()
+    exclude_dirs = ['.git', '__pycache__', '.DS_Store']
+    exclude_exts = ['.bak', '.tmp', '.log']
+    try:
+        db = StreamDb(output_path, use_compression)
+        file_count = 0
+        for root, dirs, files in os.walk(asset_dir):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for file in files:
+                if any(file.endswith(ext) for ext in exclude_exts):
+                    continue
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, asset_dir).replace('\\', '/')
+                with open(file_path, 'rb') as f:
+                    data = f.read()
+                db.write_document(arcname, data)
+                file_count += 1
+        db.close()
+        stdscr.addstr(13, 0, f"Success! Packaged {file_count} files into {output_path}.")
+        stdscr.addstr(14, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        logger.info(f"Generated SDB: {output_path} with {file_count} files")
+        return True
+    except Exception as e:
+        stdscr.addstr(13, 0, f"Failed to create .sdb. Error: {e}")
+        stdscr.addstr(14, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        logger.error(f"Failed to generate SDB {output_path}: {e}")
+        return False
 
 def curses_menu(stdscr):
-    """
-    Main curses TUI loop with ASCII Sierpinski triangle.
-    Args:
-        stdscr: Curses screen object.
-    """
     curses.curs_set(0)
     stdscr.timeout(-1)
     menu_items = [
         "1. Set up a new project - Create a project structure for IDTECH4",
         "2. Generate a .pk4 file - Package your assets into a .pk4 file",
         "3. Initialize Git repository for /game directory - Track only game logic",
-        "4. Exit - Quit the script"
-        # Placeholder menu items for future tools
-        #"5. Convert assets - Convert PNG to .dds, FBX to .md5mesh",
-        #"6. Generate scripts - Create .script files for weapons, AI",
-        #"7. Edit maps - Procedural .map file generation",
-        #"8. Manage entities - Edit .def files for entities",
-        #"9. Build binary - Compile gamex86.so or .dll"
+        "4. Generate a .sdb file - Package your assets into a StreamDb file",
+        "5. Exit - Quit the script"
     ]
     current_row = 0
     
-    # ASCII Sierpinski triangle (8 lines, provided by ALH477)
     sierpinski = """\
         /\\
        /__\\
@@ -645,10 +842,8 @@ def curses_menu(stdscr):
     
     while True:
         stdscr.clear()
-        # Display Sierpinski triangle
         for i, line in enumerate(sierpinski.splitlines()):
             stdscr.addstr(i, 0, line)
-        # Display menu below triangle
         stdscr.addstr(10, 0, "Welcome to the IDTECH4 Project Manager!")
         stdscr.addstr(11, 0, "Built for PetaByte Madness™ by DeMoD LLC")
         stdscr.addstr(12, 0, "Use arrow keys to navigate, Enter to select")
@@ -688,23 +883,11 @@ def curses_menu(stdscr):
                 else:
                     initialize_git_repo(stdscr, project_dir)
             elif current_row == 3:
+                generate_sdb(stdscr)
+            elif current_row == 4:
                 break
-            # Placeholder calls for future tools
-            #elif current_row == 4:
-            #    convert_assets(stdscr)
-            #elif current_row == 5:
-            #    generate_scripts(stdscr)
-            #elif current_row == 6:
-            #    edit_maps(stdscr)
-            #elif current_row == 7:
-            #    manage_entities(stdscr)
-            #elif current_row == 8:
-            #    build_binary(stdscr)
 
 def main():
-    """
-    Main entry point for the IDTECH4 Project Manager.
-    """
     if not check_git_installed():
         exit()
     try:
@@ -712,18 +895,16 @@ def main():
     except Exception as e:
         logger.error(f"Error running curses TUI: {e}")
         print(f"Error running TUI: {e}. Falling back to command-line mode.")
-        # Simple fallback menu
         print("Welcome to IDTECH4 Project Manager (Fallback Mode)")
         print("1. Set up a new project")
         print("2. Generate a .pk4 file")
         print("3. Initialize Git repo for /game")
-        print("4. Exit")
+        print("4. Generate a .sdb file")
+        print("5. Exit")
         choice = input("Enter choice: ")
         if choice == '1':
             project_dir = input("Enter project directory: ")
-            # Implement simplified logic without curses
             print("Setup not fully supported in fallback. Please use TUI.")
-        # Add similar for others
         input("Press Enter to exit...")
 
 if __name__ == "__main__":
