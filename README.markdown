@@ -4,6 +4,10 @@
 This Python suite, created by [ALH477](https://x.com/demodllc), streamlines IDTECH4 engine development (e.g., Doom 3, Quake 4) with a modular set of tools, built to power [*PetaByte Madness™*](https://demod.ltd/petabytemadness.html) by [DeMoD LLC](https://demod.ltd) and shared to modernize IDTECH4 for all. Tailored for [DarkRadiant](https://www.darkradiant.net/), it offers project setup, asset packaging, and Git integration via a curses-based TUI, with external scripts for advanced features like main menu generation and asset organization. Licensed under MIT and GPL v3, it’s a FOSS beacon for IDTECH4’s niche.
 
 ## Features
+
+![petabyte-small](https://github.com/user-attachments/assets/4201deb0-a34c-490f-8cd9-76a17726300a)
+
+
 - **Project Setup**: Creates a game directory with subfolders (`base`, `def`, `maps`, `models`, `textures`, `sounds`, `scripts`, `guis`) and placeholder files (`gamex86.dll`/`gamex86.so`, `game.config`) for DarkRadiant.
 - **Doom 3 /neo/game Directory**: Downloads `/neo/game` from [id-Software/DOOM-3](https://github.com/id-Software/DOOM-3) or a custom repo, providing C++ game logic.
 - **Git Integration**: Initializes a Git repo with a `.gitignore` tracking only `/game`, ensuring no accidental asset commits.
